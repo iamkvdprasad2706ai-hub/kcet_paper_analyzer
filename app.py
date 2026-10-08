@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import html
+import importlib
 import io
 import os
 import unicodedata
@@ -16,6 +17,10 @@ import streamlit as st
 import pypdfium2 as pdfium
 from dotenv import load_dotenv
 from openai import OpenAI
+
+import analyzer as analyzer_module
+
+importlib.reload(analyzer_module)
 
 from analyzer import (
     SUBJECTS,
