@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
+import io
 import os
 import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote_plus
 
 import streamlit as st
+import pypdfium2 as pdfium
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -60,6 +64,7 @@ st.markdown(
       .question-option { border:1px solid #e8eee8; border-radius:10px; padding:.55rem .75rem;
         margin:.42rem 0; background:#f8faf7; line-height:1.65; }
       .question-option strong { color:#176b54; margin-right:.35rem; }
+      .source-note { color:#536862; font-size:.9rem; }
       .stButton button[kind="primary"] { border-radius:10px; }
       [data-testid="stSidebar"] { background:#f4f7f2; }
       a { color:#176b54 !important; }
@@ -79,32 +84,88 @@ def get_source_pdf_bytes(path: str) -> bytes:
     return Path(path).read_bytes()
 
 
-def explain_question(question: Question, api_key: str) -> str:
+@st.cache_data
+def get_source_page_images(path: str, first_page: int, last_page: int) -> tuple[bytes, ...]:
+    page_images: list[bytes] = []
+    document = pdfium.PdfDocument(path)
+    try:
+        for page_number in range(first_page, last_page + 1):
+            page = document[page_number - 1]
+            try:
+                bitmap = page.render(scale=1.8)
+                image = bitmap.to_pil().convert("RGB")
+                output = io.BytesIO()
+                image.save(output, format="JPEG", quality=90, optimize=True)
+                page_images.append(output.getvalue())
+            finally:
+                page.close()
+    finally:
+        document.close()
+    return tuple(page_images)
+
+
+def explain_question(
+    question: Question,
+    api_key: str,
+    page_images: tuple[bytes, ...],
+    solution_images: tuple[bytes, ...],
+    model: str,
+) -> str:
     client = OpenAI(api_key=api_key)
     answer_note = f"The source paper's marked answer is {question.answer}." if question.answer else (
         "No marked answer was reliably extracted. Solve independently from the question if it contains enough information, "
         "label the result as your derivation rather than an official key, and explain any ambiguity instead of inventing missing text."
     )
+    content: list[dict[str, Any]] = [{
+        "type": "text",
+        "text": (
+            f"Subject: {question.subject}\nChapter estimate: {question.chapter}\n"
+            f"Text extracted from the paper (may have lost symbols): {question.text}\n{answer_note}\n\n"
+            "The attached original question-page image(s) are authoritative for the exact wording, symbols, diagrams, tables, "
+            "and answer choices. First transcribe the visible question and options accurately, retaining original "
+            "chemical formulas, subscripts, superscripts, Greek letters, operators, units, reaction arrows, and labels. "
+            "Do not silently repair ambiguous source printing: identify uncertainty explicitly. Then give a clear, "
+            "detailed KCET-level solution with numbered steps, readable LaTeX for equations, the final answer, and "
+            "a short exam tip. Treat an extracted marked answer as source-provided; if no marked answer is supplied, "
+            "solve independently and do not claim your result is an official key. If a printed solution-page image "
+            "is attached after the question images, compare it with your derivation and clearly identify it as the "
+            "source's printed solution."
+        ),
+    }]
+    image_groups = [
+        ("Original question page", page_images),
+        ("Original printed solution page", solution_images),
+    ]
+    for label, images in image_groups:
+        if images:
+            if label == "Original printed solution page":
+                content.append({
+                    "type": "text",
+                    "text": (
+                        "The following image(s) are the original paper's printed solution for this question, "
+                        "if legible. Preserve its notation and use it to check the derivation."
+                    ),
+                })
+            for image in images:
+                encoded = base64.b64encode(image).decode("ascii")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{encoded}", "detail": "high"},
+                })
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.2,
+        model=model,
+        temperature=0.1,
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "You are a careful KCET tutor. Explain the supplied question step by step at a "
-                    "pre-university level. Identify the governing concept, show calculations and units, "
-                    "derive an answer from the supplied question when possible, and finish with a short exam tip. "
-                    "Distinguish your derivation from a source-marked answer. Never invent missing text or claim an unverified answer is official."
+                    "You are a precise visual-reading KCET tutor. Read the original scanned or printed page before "
+                    "trusting extracted text. Preserve notation faithfully and provide a self-contained, accessible "
+                    "worked explanation. Use Markdown headings and display math where useful. Never invent missing "
+                    "question content, diagram labels, or an official answer."
                 ),
             },
-            {
-                "role": "user",
-                "content": (
-                    f"Subject: {question.subject}\nChapter estimate: {question.chapter}\n"
-                    f"Question: {question.text}\n{answer_note}"
-                ),
-            },
+            {"role": "user", "content": content},
         ],
     )
     content = response.choices[0].message.content
@@ -135,6 +196,7 @@ usable_papers = [paper for paper in papers if paper.questions]
 all_questions = [question for paper in papers for question in paper.questions]
 patterns = rank_patterns(papers)
 paper_paths = {(paper.subject, paper.path.name): paper.path for paper in papers}
+vision_model = os.getenv("OPENAI_VISION_MODEL", "gpt-4.1")
 
 st.markdown(
     """
@@ -158,11 +220,15 @@ with st.sidebar:
         "OpenAI API key",
         value=os.getenv("OPENAI_API_KEY", ""),
         type="password",
-        help="Only sent to OpenAI when you click Explain this question. Leave blank to browse papers without AI.",
+        help="Only sent with the selected question and its original PDF page when you request a vision explanation.",
     )
-    st.caption("You can also add OPENAI_API_KEY to a local .env file. The key is never written to the paper data.")
+    st.caption(
+        f"Vision model: `{vision_model}`. Your key is used only for an explanation request; "
+        "the selected question and relevant question/solution page images are sent to OpenAI. "
+        "API usage may incur charges."
+    )
     st.divider()
-    st.caption("Question analysis runs locally on the PDFs in your subject folders.")
+    st.caption("Question indexing is local. Original diagrams and notation remain visible in the source-page preview.")
     if st.button("Refresh paper analysis", use_container_width=True):
         get_analysis.clear()
         st.rerun()
@@ -265,13 +331,53 @@ with bank_tab:
                         f'<div class="question-stem">{html.escape(stem)}</div>',
                         unsafe_allow_html=True,
                     )
+                    source_path = paper_paths.get((question.subject, question.source))
+                    first_page = question.page_number
+                    last_page = max(first_page, question.last_page_number or first_page)
+                    solution_first_page = question.solution_page_number
+                    solution_last_page = question.solution_last_page_number or solution_first_page
+                    page_label = f"🖼️ View original PDF page · {first_page}"
+                    if last_page > first_page:
+                        page_label += f"–{last_page}"
+                    with st.expander(page_label):
+                        if source_path is None:
+                            st.warning("The source PDF for this question could not be located.")
+                        else:
+                            try:
+                                source_images = get_source_page_images(
+                                    str(source_path),
+                                    first_page,
+                                    last_page,
+                                )
+                                for page_number, image in enumerate(source_images, start=first_page):
+                                    st.image(
+                                        image,
+                                        caption=f"{question.year} source paper · page {page_number}",
+                                        use_container_width=True,
+                                    )
+                                if solution_first_page is not None and solution_last_page is not None:
+                                    st.markdown("**Original printed solution**")
+                                    solution_images = get_source_page_images(
+                                        str(source_path),
+                                        solution_first_page,
+                                        solution_last_page,
+                                    )
+                                    for page_number, image in enumerate(
+                                        solution_images,
+                                        start=solution_first_page,
+                                    ):
+                                        st.image(
+                                            image,
+                                            caption=f"{question.year} solution · page {page_number}",
+                                            use_container_width=True,
+                                        )
+                            except Exception as exc:
+                                st.error(f"Could not render the original PDF page: {exc}")
                     if any(unicodedata.category(char) == "Co" for char in question.text):
                         st.info(
                             "This PDF uses custom embedded glyphs without a Unicode map. "
-                            "The extracted symbols are preserved unchanged, but some may not look correct as text. "
-                            "Use the original PDF to verify the printed notation."
+                            "The extracted symbols are preserved unchanged; use the original page above for exact printed notation."
                         )
-                        source_path = paper_paths.get((question.subject, question.source))
                         if source_path is not None:
                             st.download_button(
                                 "Download original paper",
@@ -291,13 +397,35 @@ with bank_tab:
                     st.caption(f"Topic estimate: {question.topic} · Source: {question.source}")
                     if question.answer:
                         st.success(f"Marked answer found in source: **{question.answer}**")
-                    if st.button("✨ Explain this question", key=f"explain_{key_suffix}", type="primary"):
+                    if st.button("✨ Read symbols & explain from page", key=f"explain_{key_suffix}", type="primary"):
                         if not api_key:
-                            st.info("Add your OpenAI API key in the sidebar to request a worked explanation.")
+                            st.info("Add your OpenAI API key in the sidebar to request a vision-based worked explanation.")
+                        elif source_path is None:
+                            st.error("The source PDF is unavailable, so a page-aware explanation cannot be generated.")
                         else:
                             try:
-                                with st.spinner("Working through the solution…"):
-                                    st.session_state[solution_key] = explain_question(question, api_key)
+                                with st.spinner("Reading the original symbols and working through the solution…"):
+                                    source_images = get_source_page_images(
+                                        str(source_path),
+                                        first_page,
+                                        last_page,
+                                    )
+                                    solution_images = (
+                                        get_source_page_images(
+                                            str(source_path),
+                                            solution_first_page,
+                                            solution_last_page,
+                                        )
+                                        if solution_first_page is not None and solution_last_page is not None
+                                        else ()
+                                    )
+                                    st.session_state[solution_key] = explain_question(
+                                        question,
+                                        api_key,
+                                        source_images,
+                                        solution_images,
+                                        vision_model,
+                                    )
                             except Exception as exc:
                                 st.error(f"Could not generate the explanation: {exc}")
                     if solution_key in st.session_state:

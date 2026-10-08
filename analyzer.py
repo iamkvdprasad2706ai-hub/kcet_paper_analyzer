@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,11 +150,71 @@ class Question:
     topic: str
     answer: str | None
     source: str
+    page_number: int = 1
+    last_page_number: int | None = None
+    solution_page_number: int | None = None
+    solution_last_page_number: int | None = None
 
 
 def read_pdf_text(path: Path) -> str:
     reader = PdfReader(path)
     return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def read_pdf_pages(path: Path) -> list[str]:
+    reader = PdfReader(path)
+    return [page.extract_text() or "" for page in reader.pages]
+
+
+def page_spans(page_texts: list[str]) -> list[tuple[int, int]]:
+    spans = []
+    cursor = 0
+    for page_text in page_texts:
+        end = cursor + len(page_text)
+        spans.append((cursor, end))
+        cursor = end + 1
+    return spans
+
+
+def page_number_for_offset(offset: int, spans: list[tuple[int, int]]) -> int:
+    starts = [start for start, _ in spans]
+    return min(bisect_right(starts, offset), len(spans)) or 1
+
+
+def extract_solution_page_ranges(
+    page_texts: list[str],
+    subject: str,
+) -> dict[int, tuple[int, int]]:
+    full_text = "\n".join(page_texts)
+    subject_alias = "math(?:ematics|s)" if subject == "Mathematics" else re.escape(subject)
+    heading = re.search(
+        rf"\bSolutions?\s*[–—-]\s*{subject_alias}\b",
+        full_text,
+        flags=re.IGNORECASE,
+    )
+    if heading is None:
+        return {}
+
+    section = full_text[heading.end():]
+    section_offset = heading.end()
+    spans = page_spans(page_texts)
+    markers_by_number: dict[int, re.Match[str]] = {}
+    for marker in re.finditer(r"(?m)^[ \t]{0,8}(\d{1,2})\.\s+(?=\S)", section):
+        number = int(marker.group(1))
+        if 1 <= number <= 60:
+            markers_by_number.setdefault(number, marker)
+    ordered = sorted(markers_by_number.values(), key=lambda marker: marker.start())
+    ranges: dict[int, tuple[int, int]] = {}
+    for index, marker in enumerate(ordered):
+        end = ordered[index + 1].start() if index + 1 < len(ordered) else len(section)
+        content_end = marker.start() + len(section[marker.start():end].rstrip())
+        first_page = page_number_for_offset(section_offset + marker.start(), spans)
+        last_page = page_number_for_offset(
+            section_offset + max(marker.start(), content_end - 1),
+            spans,
+        )
+        ranges[int(marker.group(1))] = (first_page, max(first_page, last_page))
+    return ranges
 
 
 def normalize_text(text: str) -> str:
@@ -221,7 +282,14 @@ def _question_markers(text: str) -> tuple[list[re.Match[str]], str]:
     return dotted, "numbered"
 
 
-def extract_questions(text: str, subject: str, year: int, source: str) -> list[Question]:
+def extract_questions(
+    text: str,
+    subject: str,
+    year: int,
+    source: str,
+    source_page_spans: list[tuple[int, int]] | None = None,
+    source_solution_pages: dict[int, tuple[int, int]] | None = None,
+) -> list[Question]:
     markers, marker_type = _question_markers(text)
     chosen: list[re.Match[str]] = []
     expected = 1
@@ -241,6 +309,7 @@ def extract_questions(text: str, subject: str, year: int, source: str) -> list[Q
     for index, marker in enumerate(chosen):
         end = chosen[index + 1].start() if index + 1 < len(chosen) else len(text)
         raw = text[marker.end():end]
+        content_end = marker.end() + len(raw.rstrip())
         answer_match = re.search(r"\bAnswer\s+\d{1,2}\s*:\s*\(?\s*([A-D])\s*\)?", raw, re.IGNORECASE)
         answer = answer_match.group(1).upper() if answer_match else None
         if answer_match:
@@ -252,6 +321,7 @@ def extract_questions(text: str, subject: str, year: int, source: str) -> list[Q
         if len(clean) < 12:
             continue
         chapter, topic = classify_question(subject, clean)
+        solution_range = (source_solution_pages or {}).get(int(marker.group(1)))
         questions.append(Question(
             subject=subject,
             year=year,
@@ -261,6 +331,13 @@ def extract_questions(text: str, subject: str, year: int, source: str) -> list[Q
             topic=topic,
             answer=answer,
             source=source,
+            page_number=page_number_for_offset(marker.start(), source_page_spans) if source_page_spans else 1,
+            last_page_number=(
+                page_number_for_offset(max(marker.start(), content_end - 1), source_page_spans)
+                if source_page_spans else 1
+            ),
+            solution_page_number=solution_range[0] if solution_range else None,
+            solution_last_page_number=solution_range[1] if solution_range else None,
         ))
     return questions
 
@@ -304,7 +381,8 @@ def load_papers(root: Path) -> tuple[list[Paper], list[str]]:
                 continue
             year = int(year_match.group(1))
             try:
-                text = read_pdf_text(path)
+                page_texts = read_pdf_pages(path)
+                text = "\n".join(page_texts)
             except Exception as exc:
                 notices.append(f"Could not read {path.name}: {exc}")
                 papers.append(Paper(subject, year, path, (), "PDF could not be read"))
@@ -314,7 +392,14 @@ def load_papers(root: Path) -> tuple[list[Paper], list[str]]:
                 bool(re.search(r"answer\s*keys?|provisional answer", first_pages, re.IGNORECASE))
                 and not re.search(r"\bQuestion\s+\d+\s*:", text, re.IGNORECASE)
             )
-            questions = [] if is_answer_sheet else extract_questions(text, subject, year, path.name)
+            questions = [] if is_answer_sheet else extract_questions(
+                text,
+                subject,
+                year,
+                path.name,
+                page_spans(page_texts),
+                extract_solution_page_ranges(page_texts, subject),
+            )
             if not questions:
                 key_label = "answer key / answer sheet" if is_answer_sheet else "no numbered question text"
                 note = f"Detected {key_label}; no question statements were extracted."

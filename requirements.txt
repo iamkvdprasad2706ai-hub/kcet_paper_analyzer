@@ -1,4 +1,5 @@
 streamlit>=1.38
 pypdf>=5.0
+pypdfium2>=4.30
 openai>=1.50
 python-dotenv>=1.0

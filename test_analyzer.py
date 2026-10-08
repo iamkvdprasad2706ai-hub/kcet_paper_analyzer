@@ -9,6 +9,8 @@ from analyzer import (
     extract_questions,
     load_papers,
     normalize_text,
+    page_number_for_offset,
+    page_spans,
     rank_patterns,
     split_question_options,
 )
@@ -18,6 +20,21 @@ ROOT = Path(__file__).resolve().parent
 
 
 class QuestionExtractionTests(unittest.TestCase):
+    def test_page_spans_map_question_text_to_original_pdf_pages(self):
+        spans = page_spans(["Question 1: first half", "second half Question 2: next"])
+        self.assertEqual(page_number_for_offset(0, spans), 1)
+        self.assertEqual(page_number_for_offset(spans[1][0], spans), 2)
+        questions = extract_questions(
+            "Question 1: first half\nsecond half\nQuestion 2: next question body",
+            "Chemistry",
+            2018,
+            "fixture.pdf",
+            spans,
+        )
+        self.assertEqual(questions[0].page_number, 1)
+        self.assertEqual(questions[0].last_page_number, 2)
+        self.assertEqual(questions[1].page_number, 2)
+
     def test_text_normalization_preserves_original_special_characters(self):
         symbols = "PCl₅ H₂SO₄ Δ→ − α β ° ‟ \uf03d\uf02b\uf02d\uf0b0\uf0ce"
         self.assertEqual(normalize_text(f"  {symbols}  "), symbols)
@@ -122,6 +139,17 @@ class QuestionExtractionTests(unittest.TestCase):
         self.assertTrue(any("answer key" in notice.lower() for notice in notices))
         maths_2022 = next(paper for paper in papers if paper.subject == "Mathematics" and paper.year == 2022)
         self.assertEqual(maths_2022.questions, ())
+        chemistry_2016_q18 = next(
+            question for paper in papers
+            if paper.subject == "Chemistry" and paper.year == 2016
+            for question in paper.questions
+            if question.number == 18
+        )
+        self.assertEqual((chemistry_2016_q18.page_number, chemistry_2016_q18.last_page_number), (7, 8))
+        self.assertEqual(
+            (chemistry_2016_q18.solution_page_number, chemistry_2016_q18.solution_last_page_number),
+            (32, 33),
+        )
         self.assertGreater(sum(len(paper.questions) for paper in papers), 500)
         self.assertTrue(all(question.text for paper in papers for question in paper.questions))
         total = sum(len(paper.questions) for paper in papers)

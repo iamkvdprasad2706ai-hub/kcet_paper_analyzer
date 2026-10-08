@@ -18,9 +18,12 @@ streamlit run app.py
 The `.env` file is optional. To request step-by-step explanations, replace the
 placeholder in `.env` with your OpenAI API key. You can instead paste a key
 into the app's password field for the current session. A key is used only when
-you click **Explain this question**; the app sends that question's extracted
-text to OpenAI and does not upload whole PDFs. Keep `.env` private and do not
-commit it.
+you click **Read symbols & explain from page**. The app sends the selected
+question text and rendered question/solution page images to the configured
+OpenAI vision model; it does not upload the complete paper. API usage may
+incur charges. Keep `.env` private and do not commit it. Set
+`OPENAI_VISION_MODEL` to choose another compatible vision model; the default
+is `gpt-4.1`.
 
 ## How the analysis works
 
@@ -35,8 +38,16 @@ commit it.
   with damaged or missing option text may still need manual review.
 - Text normalization preserves Unicode punctuation, mathematical notation,
   and private-use glyphs exactly as extracted. Some older PDFs use embedded
-  fonts without Unicode maps; affected questions show a notice and a download
-  button for checking their original printed notation.
+  fonts without Unicode maps; affected questions show a notice, an original
+  page preview, and a download button for checking their printed notation.
+- Original PDF pages are rendered for each question so diagrams, graphs,
+  tables, and source typography remain available. On request, the vision model
+  reads that page image alongside the extracted text, then provides a detailed
+  explanation with readable mathematical notation. Model transcription should
+  still be checked against the displayed source page when the scan is unclear.
+- Papers that include printed worked solutions have those solution pages
+  mapped back to their questions; the original solution page is shown and sent
+  with the question page for visual explanations.
 - Pattern priority is based on the number of distinct usable paper years in
   which the chapter/topic appears. It describes observed recurrence, not a
   forecast, official weightage, or guaranteed rank.
