@@ -7,6 +7,7 @@ from analyzer import (
     build_study_plan,
     classify_question,
     extract_questions,
+    generate_practice_paper,
     load_papers,
     normalize_text,
     page_number_for_offset,
@@ -20,6 +21,37 @@ ROOT = Path(__file__).resolve().parent
 
 
 class QuestionExtractionTests(unittest.TestCase):
+    def test_practice_paper_is_repeatable_unique_and_recurrence_weighted(self):
+        papers = []
+        for year in (2021, 2022, 2023, 2024):
+            questions = [
+                Question(
+                    "Physics", year, number, f"recurring chapter problem {year} {number}",
+                    "Current Electricity", "Circuit calculations", None, f"{year}.pdf",
+                )
+                for number in range(1, 21)
+            ]
+            if year == 2024:
+                questions.extend(
+                    Question(
+                        "Physics", year, number, f"rare chapter problem {number}",
+                        "Wave Optics", "Diffraction", None, f"{year}.pdf",
+                    )
+                    for number in range(21, 31)
+                )
+            papers.append(Paper("Physics", year, Path(f"{year}.pdf"), tuple(questions)))
+
+        first = generate_practice_paper(papers, "Physics", 2027, question_count=60)
+        second = generate_practice_paper(papers, "Physics", 2027, question_count=60)
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 60)
+        self.assertEqual(len({question.text for question in first}), 60)
+        self.assertGreater(
+            sum(question.chapter == "Current Electricity" for question in first),
+            sum(question.chapter == "Wave Optics" for question in first),
+        )
+        self.assertEqual(generate_practice_paper([], "Physics", 2027), [])
+
     def test_page_spans_map_question_text_to_original_pdf_pages(self):
         spans = page_spans(["Question 1: first half", "second half Question 2: next"])
         self.assertEqual(page_number_for_offset(0, spans), 1)
@@ -152,6 +184,11 @@ class QuestionExtractionTests(unittest.TestCase):
         )
         self.assertGreater(sum(len(paper.questions) for paper in papers), 500)
         self.assertTrue(all(question.text for paper in papers for question in paper.questions))
+        for subject in ("Chemistry", "Mathematics", "Physics"):
+            mock = generate_practice_paper(papers, subject, 2027, question_count=60)
+            self.assertEqual(len(mock), 60)
+            self.assertEqual(len({question.text.casefold() for question in mock}), 60)
+            self.assertTrue(all(question.subject == subject for question in mock))
         total = sum(len(paper.questions) for paper in papers)
         classified = sum(
             question.chapter != "Needs review"

@@ -48,6 +48,10 @@ is `gpt-4.1`.
 - Papers that include printed worked solutions have those solution pages
   mapped back to their questions; the original solution page is shown and sent
   with the question page for visual explanations.
+- The separate next-year practice-paper tab assembles up to 60 distinct
+  historical questions per subject with recurrence-weighted chapter selection.
+  Each paper can be downloaded as Markdown and includes its source year and
+  question number. It is a practice mock, not a prediction of the actual exam.
 - Pattern priority is based on the number of distinct usable paper years in
   which the chapter/topic appears. It describes observed recurrence, not a
   forecast, official weightage, or guaranteed rank.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import random
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -439,6 +440,67 @@ def rank_patterns(papers: list[Paper]) -> list[dict[str, Any]]:
         row["priority"] = "High" if coverage >= 0.65 else "Medium" if coverage >= 0.35 else "Build foundations"
         ranked.append(row)
     return sorted(ranked, key=lambda item: (-item["coverage"], -item["count"], item["subject"], item["chapter"], item["topic"]))
+
+
+def generate_practice_paper(
+    papers: list[Paper],
+    subject: str,
+    target_year: int,
+    question_count: int = 60,
+) -> list[Question]:
+    """Build a repeatable, recurrence-weighted mock from unique source questions."""
+    if question_count < 1:
+        raise ValueError("question_count must be at least 1")
+
+    candidates = [
+        question
+        for paper in papers
+        if paper.subject == subject
+        for question in paper.questions
+    ]
+    unique: dict[str, Question] = {}
+    for question in candidates:
+        fingerprint = " ".join(question.text.casefold().split())
+        unique.setdefault(fingerprint, question)
+    candidates = list(unique.values())
+    if not candidates:
+        return []
+
+    pattern_counts: Counter[str] = Counter()
+    pattern_coverage: dict[str, float] = defaultdict(float)
+    for row in rank_patterns(papers):
+        if row["subject"] != subject or row["chapter"] == "Needs review":
+            continue
+        pattern_counts[row["chapter"]] += row["count"]
+        pattern_coverage[row["chapter"]] = max(
+            pattern_coverage[row["chapter"]],
+            row["coverage"],
+        )
+
+    questions_per_chapter = Counter(question.chapter for question in candidates)
+    chapter_weights = {
+        chapter: max(1.0, count * (1 + pattern_coverage.get(chapter, 0)))
+        for chapter, count in pattern_counts.items()
+    }
+    question_weights = [
+        chapter_weights.get(question.chapter, 0.25) / questions_per_chapter[question.chapter]
+        for question in candidates
+    ]
+
+    rng = random.Random(f"kcet-practice-{target_year}-{subject}")
+    selected: list[Question] = []
+    remaining_questions = candidates.copy()
+    remaining_weights = question_weights.copy()
+    for _ in range(min(question_count, len(remaining_questions))):
+        index = rng.choices(
+            range(len(remaining_questions)),
+            weights=remaining_weights,
+            k=1,
+        )[0]
+        selected.append(remaining_questions.pop(index))
+        remaining_weights.pop(index)
+    rng.shuffle(selected)
+    return selected
 
 
 def build_study_plan(papers: list[Paper], weeks: int = 8, hours_per_week: int = 12) -> list[dict[str, Any]]:

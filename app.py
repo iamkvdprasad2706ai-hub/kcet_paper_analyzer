@@ -7,6 +7,7 @@ import io
 import os
 import unicodedata
 from collections import Counter, defaultdict
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -22,6 +23,7 @@ from analyzer import (
     Question,
     available_chapters,
     build_study_plan,
+    generate_practice_paper,
     load_papers,
     rank_patterns,
     split_question_options,
@@ -248,8 +250,8 @@ for column, label, value in zip(
     )
 
 st.write("")
-overview_tab, bank_tab, plan_tab, resources_tab = st.tabs(
-    ["✨ Pattern insights", "📖 Question bank", "🗓️ Study plan", "🔗 Learning resources"]
+overview_tab, bank_tab, prediction_tab, plan_tab, resources_tab = st.tabs(
+    ["✨ Pattern insights", "📖 Question bank", "🎯 Next-year practice papers", "🗓️ Study plan", "🔗 Learning resources"]
 )
 
 with overview_tab:
@@ -431,6 +433,112 @@ with bank_tab:
                     if solution_key in st.session_state:
                         st.markdown("**Step-by-step explanation**")
                         st.markdown(st.session_state[solution_key])
+
+with prediction_tab:
+    target_year = date.today().year + 1
+    st.subheader(f"{target_year} KCET analysis-weighted practice papers")
+    st.markdown(
+        '<p class="section-note">These are practice mocks assembled from your past-paper questions. '
+        'They emphasize recurring chapters; they are not predictions of the actual exam or a guarantee of questions.</p>',
+        unsafe_allow_html=True,
+    )
+    st.info(
+        "Each subject paper selects up to 60 distinct questions from the available extracted papers, "
+        "weighted toward patterns seen repeatedly across years. Questions retain their source year and number. "
+        "Check the current KEA syllabus and exam instructions before using this as a timed mock."
+    )
+    if st.button(
+        f"Build / refresh all three {target_year} practice papers",
+        type="primary",
+        key="build_prediction_papers",
+    ):
+        st.session_state["prediction_papers"] = {
+            subject: generate_practice_paper(papers, subject, target_year, question_count=60)
+            for subject in SUBJECTS
+        }
+        st.session_state["prediction_papers_year"] = target_year
+
+    prediction_papers = st.session_state.get("prediction_papers", {})
+    if not prediction_papers:
+        st.caption("Select the button above to build the Chemistry, Mathematics, and Physics practice papers.")
+    else:
+        subject_tabs = st.tabs(list(SUBJECTS))
+        for subject_tab, subject in zip(subject_tabs, SUBJECTS):
+            with subject_tab:
+                selected_questions = prediction_papers.get(subject, [])
+                st.markdown(f"#### {subject} · {len(selected_questions)} questions")
+                if not selected_questions:
+                    st.warning("There are no extracted source questions available for this subject.")
+                    continue
+
+                chapter_counts = Counter(question.chapter for question in selected_questions)
+                top_chapters = sorted(chapter_counts.items(), key=lambda item: (-item[1], item[0]))
+                st.markdown(
+                    "**Chapter mix:** " + " · ".join(
+                        f"{chapter}: {count}" for chapter, count in top_chapters[:8]
+                    )
+                )
+
+                paper_markdown = [
+                    f"# {target_year} KCET {subject} — Practice Mock",
+                    "",
+                    "> Analysis-weighted practice from previous papers; not an actual or guaranteed prediction.",
+                    "",
+                ]
+                for number, question in enumerate(selected_questions, start=1):
+                    stem, options = split_question_options(question.text)
+                    paper_markdown.extend([
+                        f"## Question {number}",
+                        "",
+                        stem,
+                        "",
+                    ])
+                    for label, option_text in options:
+                        paper_markdown.append(f"- **({label})** {option_text}")
+                    paper_markdown.extend([
+                        "",
+                        f"*Chapter estimate: {question.chapter} · Source: {question.year}, Q{question.number}*",
+                        "",
+                    ])
+                    with st.expander(
+                        f"Question {number} · {question.chapter} · source {question.year}, Q{question.number}"
+                    ):
+                        st.markdown(f"**{stem}**")
+                        if options:
+                            for label, option_text in options:
+                                st.markdown(f"- **({label})** {option_text}")
+                        source_path = paper_paths.get((question.subject, question.source))
+                        first_page = question.page_number
+                        last_page = max(first_page, question.last_page_number or first_page)
+                        if source_path is not None:
+                            source_label = f"View original question page(s) {first_page}"
+                            if last_page > first_page:
+                                source_label += f"–{last_page}"
+                            with st.expander(source_label):
+                                try:
+                                    source_images = get_source_page_images(
+                                        str(source_path),
+                                        first_page,
+                                        last_page,
+                                    )
+                                    for page_number, image in enumerate(source_images, start=first_page):
+                                        st.image(
+                                            image,
+                                            caption=f"{question.year} source paper · page {page_number}",
+                                            use_container_width=True,
+                                        )
+                                except Exception as exc:
+                                    st.error(f"Could not render the original PDF page: {exc}")
+                        if question.answer:
+                            st.caption(f"Source paper marked answer: {question.answer}")
+
+                st.download_button(
+                    f"Download {subject} mock (.md)",
+                    data="\n".join(paper_markdown),
+                    file_name=f"KCET_{target_year}_{subject.replace(' ', '_')}_practice_mock.md",
+                    mime="text/markdown",
+                    key=f"download_prediction_{subject}",
+                )
 
 with plan_tab:
     st.subheader(f"A focused {weeks}-week preparation plan")
